@@ -1,6 +1,7 @@
 import time
 import os
 import json
+from difflib import get_close_matches
 from window_reader import get_active_window
 from name_cleaner import clean_name
 from obs_client import set_recording_directory, configure, get_recording_directory
@@ -8,6 +9,7 @@ from obs_client import set_recording_directory, configure, get_recording_directo
 CONFIG_FILE = "config.json"
 GAME_MAP_FILE = "game_map.json"
 POLL_INTERVAL = 2
+FUZZY_MATCH_THRESHOLD = 0.75  # How similar a name needs to be (0.0 - 1.0)
 
 
 def load_config():
@@ -23,7 +25,7 @@ def save_config(config: dict):
 
 def first_time_setup():
     print("=" * 45)
-    print("   OBS Game Organizer — First Time Setup")
+    print("   OBS Game Organizer \u2014 First Time Setup")
     print("=" * 45)
     print("This will only run once. Your settings")
     print("will be saved for future launches.\n")
@@ -92,8 +94,65 @@ def resolve_game_name(window_info: dict, game_map: dict) -> str:
     return cleaned if cleaned else "Unknown-Game"
 
 
-def ensure_folder(path: str):
-    os.makedirs(path, exist_ok=True)
+def get_existing_folders(base_path: str) -> list:
+    """Returns a list of existing folder names inside the base recording path."""
+    if not os.path.exists(base_path):
+        return []
+    return [
+        f for f in os.listdir(base_path)
+        if os.path.isdir(os.path.join(base_path, f))
+    ]
+
+
+def find_best_folder_match(game_name: str, existing_folders: list) -> str | None:
+    """
+    Looks through existing folders for a name close enough to game_name.
+    Returns the matching folder name if found, or None if no match.
+
+    Example:
+      game_name = 'Fortnite-Chapter-5'
+      existing  = ['Fortnite', 'Minecraft', 'Valorant']
+      returns   -> 'Fortnite'  (close enough match)
+    """
+    if not existing_folders:
+        return None
+
+    matches = get_close_matches(
+        game_name.lower(),
+        [f.lower() for f in existing_folders],
+        n=1,
+        cutoff=FUZZY_MATCH_THRESHOLD
+    )
+
+    if matches:
+        # Return the original folder name (not lowercased)
+        matched_lower = matches[0]
+        for folder in existing_folders:
+            if folder.lower() == matched_lower:
+                return folder
+
+    return None
+
+
+def resolve_folder_path(base_path: str, game_name: str) -> tuple[str, str]:
+    """
+    Finds the best folder for this game.
+    - If a similar folder already exists, use that.
+    - Otherwise create a new folder with the game name.
+    Returns (folder_path, matched_or_created_name)
+    """
+    existing = get_existing_folders(base_path)
+    match = find_best_folder_match(game_name, existing)
+
+    if match:
+        folder_path = os.path.join(base_path, match)
+        print(f"[Folder] Matched '{game_name}' -> existing folder '{match}'")
+        return folder_path, match
+    else:
+        folder_path = os.path.join(base_path, game_name)
+        os.makedirs(folder_path, exist_ok=True)
+        print(f"[Folder] Created new folder '{game_name}'")
+        return folder_path, game_name
 
 
 def main():
@@ -104,7 +163,6 @@ def main():
         config = load_config()
         config = returning_user_check(config)
 
-    # Apply OBS connection settings from config
     configure(
         config["obs_host"],
         config["obs_port"],
@@ -113,7 +171,6 @@ def main():
 
     BASE_RECORDING_PATH = config["base_recording_path"]
 
-    # Load game map
     with open(GAME_MAP_FILE, "r") as f:
         GAME_MAP = json.load(f)
 
@@ -126,11 +183,10 @@ def main():
     while True:
         window = get_active_window()
         game_name = resolve_game_name(window, GAME_MAP)
-        folder_path = os.path.join(BASE_RECORDING_PATH, game_name)
 
         if game_name != last_game:
             print(f"[Detected] {window.get('title', '')} -> {game_name}")
-            ensure_folder(folder_path)
+            folder_path, used_name = resolve_folder_path(BASE_RECORDING_PATH, game_name)
             set_recording_directory(folder_path)
             last_game = game_name
 
