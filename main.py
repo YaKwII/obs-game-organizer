@@ -4,12 +4,19 @@ import json
 from difflib import get_close_matches
 from window_reader import get_active_window
 from name_cleaner import clean_name
-from obs_client import set_recording_directory, configure, get_recording_directory
+from game_filter import is_game_window
+from obs_client import (
+    set_recording_directory,
+    set_current_game,
+    configure,
+    get_recording_directory,
+    listen_for_recording_stop
+)
 
 CONFIG_FILE = "config.json"
 GAME_MAP_FILE = "game_map.json"
 POLL_INTERVAL = 2
-FUZZY_MATCH_THRESHOLD = 0.75  # How similar a name needs to be (0.0 - 1.0)
+FUZZY_MATCH_THRESHOLD = 0.75
 
 
 def load_config():
@@ -95,7 +102,6 @@ def resolve_game_name(window_info: dict, game_map: dict) -> str:
 
 
 def get_existing_folders(base_path: str) -> list:
-    """Returns a list of existing folder names inside the base recording path."""
     if not os.path.exists(base_path):
         return []
     return [
@@ -104,43 +110,23 @@ def get_existing_folders(base_path: str) -> list:
     ]
 
 
-def find_best_folder_match(game_name: str, existing_folders: list) -> str | None:
-    """
-    Looks through existing folders for a name close enough to game_name.
-    Returns the matching folder name if found, or None if no match.
-
-    Example:
-      game_name = 'Fortnite-Chapter-5'
-      existing  = ['Fortnite', 'Minecraft', 'Valorant']
-      returns   -> 'Fortnite'  (close enough match)
-    """
+def find_best_folder_match(game_name: str, existing_folders: list):
     if not existing_folders:
         return None
-
     matches = get_close_matches(
         game_name.lower(),
         [f.lower() for f in existing_folders],
         n=1,
         cutoff=FUZZY_MATCH_THRESHOLD
     )
-
     if matches:
-        # Return the original folder name (not lowercased)
-        matched_lower = matches[0]
         for folder in existing_folders:
-            if folder.lower() == matched_lower:
+            if folder.lower() == matches[0]:
                 return folder
-
     return None
 
 
-def resolve_folder_path(base_path: str, game_name: str) -> tuple[str, str]:
-    """
-    Finds the best folder for this game.
-    - If a similar folder already exists, use that.
-    - Otherwise create a new folder with the game name.
-    Returns (folder_path, matched_or_created_name)
-    """
+def resolve_folder_path(base_path: str, game_name: str):
     existing = get_existing_folders(base_path)
     match = find_best_folder_match(game_name, existing)
 
@@ -156,7 +142,6 @@ def resolve_folder_path(base_path: str, game_name: str) -> tuple[str, str]:
 
 
 def main():
-    # First time or returning user
     if not os.path.exists(CONFIG_FILE):
         config = first_time_setup()
     else:
@@ -174,24 +159,40 @@ def main():
     with open(GAME_MAP_FILE, "r") as f:
         GAME_MAP = json.load(f)
 
+    # Start listening for OBS recording stop events in background
+    event_client = listen_for_recording_stop(BASE_RECORDING_PATH)
+
     print("OBS Game Organizer is running...")
     print(f"Saving recordings to: {BASE_RECORDING_PATH}")
+    print("Watching for game windows only.")
     print("Press Ctrl+C to stop.\n")
 
     last_game = None
 
-    while True:
-        window = get_active_window()
-        game_name = resolve_game_name(window, GAME_MAP)
+    try:
+        while True:
+            window = get_active_window()
 
-        if game_name != last_game:
-            print(f"[Detected] {window.get('title', '')} -> {game_name}")
-            folder_path, used_name = resolve_folder_path(BASE_RECORDING_PATH, game_name)
-            set_recording_directory(folder_path)
-            last_game = game_name
+            # Only act if the active window is a known game
+            if not is_game_window(window):
+                time.sleep(POLL_INTERVAL)
+                continue
 
-        time.sleep(POLL_INTERVAL)
+            game_name = resolve_game_name(window, GAME_MAP)
 
+            if game_name != last_game:
+                print(f"[Detected] {window.get('title', '')} -> {game_name}")
+                folder_path, used_name = resolve_folder_path(BASE_RECORDING_PATH, game_name)
+                set_recording_directory(folder_path)
+                set_current_game(folder_path, used_name)
+                last_game = game_name
 
-if __name__ == "__main__":
-    main()
+            time.sleep(POLL_INTERVAL)
+
+    except KeyboardInterrupt:
+        print("\n" + "=" * 45)
+        print("   OBS Game Organizer is no longer running.")
+        print("   Your recordings have been saved.")
+        print("=" * 45)
+        if event_client:
+            event_client.disconnect()
