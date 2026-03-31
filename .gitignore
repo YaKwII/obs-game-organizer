@@ -1,0 +1,6 @@
+# Ignore saved config (contains your OBS password)
+config.json
+__pycache__/
+*.pyc
+*.pyo
+.env
